@@ -9,10 +9,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { CheckCircle, ArrowLeft } from "lucide-react"
 import Image from "next/image"
 import Link from "next/link"
+import { getDiscordWebhook, saveDiscordWebhook } from "@/lib/supabase"
+import { clearAllMor } from "@/lib/mor-storage"
 
 export default function AdminSettings() {
   const [webhookUrl, setWebhookUrl] = useState("")
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSaving, setIsSaving] = useState(false)
   const router = useRouter()
 
   useEffect(() => {
@@ -40,25 +44,47 @@ export default function AdminSettings() {
 
     setIsAuthenticated(true)
 
-    // Carregar webhook URL se existir
-    const savedWebhook = localStorage.getItem("discordWebhook")
-    if (savedWebhook) {
-      setWebhookUrl(savedWebhook)
+    // Carregar webhook URL do banco de dados
+    const loadWebhook = async () => {
+      try {
+        const webhook = await getDiscordWebhook()
+        setWebhookUrl(webhook)
+      } catch (error) {
+        console.error("Erro ao carregar webhook:", error)
+      } finally {
+        setIsLoading(false)
+      }
     }
+
+    loadWebhook()
   }, [router])
 
-  const handleSaveWebhook = () => {
+  const handleSaveWebhook = async () => {
     // Validar URL
-    if (!webhookUrl.startsWith("https://discord.com/api/webhooks/")) {
+    if (webhookUrl && !webhookUrl.startsWith("https://discord.com/api/webhooks/")) {
       alert("Por favor, insira uma URL de webhook válida do Discord")
       return
     }
 
-    localStorage.setItem("discordWebhook", webhookUrl)
-    alert("Webhook do Discord salvo com sucesso!")
+    setIsSaving(true)
+
+    try {
+      await saveDiscordWebhook(webhookUrl)
+      alert("Webhook do Discord salvo com sucesso!")
+    } catch (error) {
+      console.error("Erro ao salvar webhook:", error)
+      alert("Erro ao salvar webhook. Tente novamente.")
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const testWebhook = async () => {
+    if (!webhookUrl) {
+      alert("Por favor, insira uma URL de webhook primeiro")
+      return
+    }
+
     try {
       const response = await fetch(webhookUrl, {
         method: "POST",
@@ -81,15 +107,35 @@ export default function AdminSettings() {
     }
   }
 
-  const clearMorList = () => {
+  const clearMorList = async () => {
     if (confirm("Tem certeza que deseja limpar toda a lista MOR? Esta ação não pode ser desfeita.")) {
-      localStorage.setItem("morList", JSON.stringify([]))
-      alert("Lista MOR limpa com sucesso!")
+      setIsSaving(true)
+
+      try {
+        await clearAllMor()
+        alert("Lista MOR limpa com sucesso!")
+      } catch (error) {
+        console.error("Erro ao limpar lista MOR:", error)
+        alert("Erro ao limpar lista MOR. Tente novamente.")
+      } finally {
+        setIsSaving(false)
+      }
     }
   }
 
   if (!isAuthenticated) {
     return <div>Carregando...</div>
+  }
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
+        <div className="text-white text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500 mx-auto mb-4"></div>
+          <p className="text-xl">Carregando configurações...</p>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -124,14 +170,15 @@ export default function AdminSettings() {
                 Este webhook será usado para enviar notificações MOR para o canal configurado
               </div>
               <div className="flex space-x-2">
-                <Button onClick={handleSaveWebhook} className="bg-green-600 hover:bg-green-700">
+                <Button onClick={handleSaveWebhook} className="bg-green-600 hover:bg-green-700" disabled={isSaving}>
                   <CheckCircle className="mr-2 h-4 w-4" />
-                  Salvar Webhook
+                  {isSaving ? "Salvando..." : "Salvar Webhook"}
                 </Button>
                 <Button
                   onClick={testWebhook}
                   variant="outline"
                   className="border-purple-500 text-purple-300 hover:bg-purple-900/30"
+                  disabled={isSaving}
                 >
                   Testar Conexão
                 </Button>
@@ -141,7 +188,12 @@ export default function AdminSettings() {
             <div className="pt-4 border-t border-slate-700">
               <h3 className="text-lg font-medium text-white mb-3">Gerenciamento de MOR</h3>
               <div className="space-y-3">
-                <Button onClick={clearMorList} variant="destructive" className="bg-red-600 hover:bg-red-700">
+                <Button
+                  onClick={clearMorList}
+                  variant="destructive"
+                  className="bg-red-600 hover:bg-red-700"
+                  disabled={isSaving}
+                >
                   Limpar Lista MOR
                 </Button>
                 <div className="text-sm text-slate-400">

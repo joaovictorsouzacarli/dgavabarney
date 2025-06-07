@@ -10,18 +10,11 @@ import Image from "next/image"
 import Link from "next/link"
 import { sendMorToDiscord, notifyMorRemovalToDiscord } from "@/lib/discord"
 import { saveMor, removeMor, hasMor, getMorList } from "@/lib/mor-storage"
-
-interface ParticipantData {
-  id: string
-  playerName: string
-  role: string
-  ip: number
-  timestamp: number
-  status?: "selected" | "mor" | "pending"
-}
+import { getAllParticipants, updateParticipantStatus, clearAllParticipants } from "@/lib/participants"
+import type { Participant, MorEntry } from "@/lib/supabase"
 
 interface GroupedParticipants {
-  [role: string]: ParticipantData[]
+  [role: string]: Participant[]
 }
 
 // Cores para cada tipo de função/classe
@@ -56,14 +49,69 @@ const roleCategories = {
 }
 
 export default function AdminPanel() {
-  const [participants, setParticipants] = useState<ParticipantData[]>([])
+  const [participants, setParticipants] = useState<Participant[]>([])
   const [groupedParticipants, setGroupedParticipants] = useState<GroupedParticipants>({})
-  const [selectedParticipants, setSelectedParticipants] = useState<ParticipantData[]>([])
-  const [morParticipants, setMorParticipants] = useState<ParticipantData[]>([])
+  const [selectedParticipants, setSelectedParticipants] = useState<Participant[]>([])
+  const [morParticipants, setMorParticipants] = useState<Participant[]>([])
   const [loading, setLoading] = useState(false)
-  const [morListFromStorage, setMorListFromStorage] = useState<any[]>([])
+  const [morListFromStorage, setMorListFromStorage] = useState<MorEntry[]>([])
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
   const router = useRouter()
+
+  // Função para carregar dados
+  const loadData = async () => {
+    setIsLoading(true)
+    try {
+      // Carregar participantes
+      const allParticipants = await getAllParticipants()
+
+      // Carregar lista MOR
+      const morList = await getMorList()
+      setMorListFromStorage(morList)
+
+      // Marcar participantes que já têm MOR
+      const participantsWithMorStatus = await Promise.all(
+        allParticipants.map(async (participant) => {
+          const hasMorStatus = await hasMor(participant.id)
+          if (hasMorStatus) {
+            return { ...participant, status: "mor" as const }
+          }
+          return participant
+        }),
+      )
+
+      setParticipants(participantsWithMorStatus)
+
+      // Agrupar por função
+      const grouped = participantsWithMorStatus.reduce((acc: GroupedParticipants, participant: Participant) => {
+        if (!acc[participant.role]) {
+          acc[participant.role] = []
+        }
+        acc[participant.role].push(participant)
+        return acc
+      }, {})
+
+      // Ordenar por IP (maior para menor)
+      Object.keys(grouped).forEach((role) => {
+        grouped[role].sort((a, b) => b.ip - a.ip)
+      })
+
+      setGroupedParticipants(grouped)
+
+      // Contar participantes já selecionados ou com MOR
+      const selected = participantsWithMorStatus.filter((p: Participant) => p.status === "selected")
+      const mor = participantsWithMorStatus.filter((p: Participant) => p.status === "mor")
+
+      setSelectedParticipants(selected)
+      setMorParticipants(mor)
+    } catch (error) {
+      console.error("Erro ao carregar dados:", error)
+      alert("Erro ao carregar dados. Por favor, recarregue a página.")
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
   useEffect(() => {
     // Verificar autenticação
@@ -90,45 +138,8 @@ export default function AdminPanel() {
 
     setIsAuthenticated(true)
 
-    // Carregar dados do localStorage
-    const data = JSON.parse(localStorage.getItem("participants") || "[]")
-
-    // Verificar MORs existentes para marcar participantes
-    const existingMorList = getMorList()
-    setMorListFromStorage(existingMorList)
-
-    // Marcar participantes que já têm MOR
-    const dataWithMorStatus = data.map((participant: ParticipantData) => {
-      if (hasMor(participant.id)) {
-        return { ...participant, status: "mor" }
-      }
-      return participant
-    })
-
-    setParticipants(dataWithMorStatus)
-
-    // Agrupar por função
-    const grouped = dataWithMorStatus.reduce((acc: GroupedParticipants, participant: ParticipantData) => {
-      if (!acc[participant.role]) {
-        acc[participant.role] = []
-      }
-      acc[participant.role].push(participant)
-      return acc
-    }, {})
-
-    // Ordenar por IP (maior para menor)
-    Object.keys(grouped).forEach((role) => {
-      grouped[role].sort((a, b) => b.ip - a.ip)
-    })
-
-    setGroupedParticipants(grouped)
-
-    // Contar participantes já selecionados ou com MOR
-    const selected = dataWithMorStatus.filter((p: ParticipantData) => p.status === "selected")
-    const mor = dataWithMorStatus.filter((p: ParticipantData) => p.status === "mor")
-
-    setSelectedParticipants(selected)
-    setMorParticipants(mor)
+    // Carregar dados
+    loadData()
   }, [router])
 
   const handleLogout = () => {
@@ -137,93 +148,126 @@ export default function AdminPanel() {
     router.push("/admin/login")
   }
 
-  const handleSelectParticipant = async (participant: ParticipantData) => {
+  const handleSelectParticipant = async (participant: Participant) => {
     setLoading(true)
 
-    // Verificar se já foi selecionado para evitar duplicação
-    if (participant.status === "selected") {
-      alert("Este jogador já foi selecionado!")
+    try {
+      // Verificar se já foi selecionado para evitar duplicação
+      if (participant.status === "selected") {
+        alert("Este jogador já foi selecionado!")
+        setLoading(false)
+        return
+      }
+
+      // Verificar se o participante tinha MOR e notificar a remoção
+      const hasMorStatus = await hasMor(participant.id)
+      if (hasMorStatus) {
+        const morData = await removeMor(participant.id)
+
+        // Notificar no Discord que o MOR foi usado
+        if (morData) {
+          await notifyMorRemovalToDiscord(participant.player_name)
+        }
+      }
+
+      // Atualizar status no banco de dados
+      await updateParticipantStatus(participant.id, "selected")
+
+      // Atualizar interface
+      setSelectedParticipants((prev) => [...prev, participant])
+      setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: "selected" as const } : p)))
+      setMorParticipants((prev) => prev.filter((p) => p.id !== participant.id))
+
+      // Atualizar o agrupamento
+      setGroupedParticipants((prev) => {
+        const updated = { ...prev }
+        if (updated[participant.role]) {
+          updated[participant.role] = updated[participant.role].map((p) =>
+            p.id === participant.id ? { ...p, status: "selected" as const } : p,
+          )
+        }
+        return updated
+      })
+    } catch (error) {
+      console.error("Erro ao selecionar participante:", error)
+      alert("Erro ao selecionar participante. Tente novamente.")
+    } finally {
       setLoading(false)
-      return
     }
-
-    // Verificar se o participante tinha MOR e notificar a remoção
-    if (hasMor(participant.id)) {
-      const morData = removeMor(participant.id)
-
-      // Notificar no Discord que o MOR foi usado
-      if (morData) {
-        await notifyMorRemovalToDiscord(participant.playerName)
-      }
-    }
-
-    // Adicionar à lista de selecionados
-    setSelectedParticipants((prev) => [...prev, participant])
-    setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: "selected" } : p)))
-    setMorParticipants((prev) => prev.filter((p) => p.id !== participant.id))
-
-    setLoading(false)
   }
 
-  const handleDeselectParticipant = (participant: ParticipantData) => {
-    // Remover da lista de selecionados
-    setSelectedParticipants((prev) => prev.filter((p) => p.id !== participant.id))
-
-    // Voltar status para pendente
-    setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: undefined } : p)))
-
-    // Atualizar o groupedParticipants
-    setGroupedParticipants((prev) => {
-      const updated = { ...prev }
-      if (updated[participant.role]) {
-        updated[participant.role] = updated[participant.role].map((p) =>
-          p.id === participant.id ? { ...p, status: undefined } : p,
-        )
-      }
-      return updated
-    })
-  }
-
-  const handleMorParticipant = async (participant: ParticipantData) => {
+  const handleDeselectParticipant = async (participant: Participant) => {
     setLoading(true)
 
-    // Verificar se o webhook está configurado
-    const webhookUrl = localStorage.getItem("discordWebhook")
+    try {
+      // Atualizar status no banco de dados
+      await updateParticipantStatus(participant.id, "pending")
 
-    let discordMessageId = null
+      // Remover da lista de selecionados
+      setSelectedParticipants((prev) => prev.filter((p) => p.id !== participant.id))
 
-    if (webhookUrl) {
-      // Enviar para o Discord apenas se o webhook estiver configurado
-      discordMessageId = await sendMorToDiscord(participant.playerName)
-    } else {
-      // Mostrar aviso amigável se não estiver configurado
-      alert(
-        "⚠️ Webhook do Discord não configurado. O MOR foi salvo localmente, mas não foi enviado para o Discord. Configure o webhook em Configurações.",
-      )
-    }
+      // Voltar status para pendente
+      setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: "pending" as const } : p)))
 
-    // Salvar MOR com o ID da mensagem (ou null se não enviou)
-    saveMor(participant.id, participant.playerName, discordMessageId)
-
-    // Atualizar interface
-    setMorParticipants((prev) => [...prev, participant])
-    setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: "mor" } : p)))
-
-    setLoading(false)
-
-    if (webhookUrl) {
-      alert(`${participant.playerName} foi adicionado à lista MOR e notificado no Discord!`)
-    } else {
-      alert(
-        `${participant.playerName} foi adicionado à lista MOR! (Configure o webhook do Discord para enviar notificações automáticas)`,
-      )
+      // Atualizar o groupedParticipants
+      setGroupedParticipants((prev) => {
+        const updated = { ...prev }
+        if (updated[participant.role]) {
+          updated[participant.role] = updated[participant.role].map((p) =>
+            p.id === participant.id ? { ...p, status: "pending" as const } : p,
+          )
+        }
+        return updated
+      })
+    } catch (error) {
+      console.error("Erro ao desselecionar participante:", error)
+      alert("Erro ao desselecionar participante. Tente novamente.")
+    } finally {
+      setLoading(false)
     }
   }
 
-  const handleTrollRaffle = (trollParticipants: ParticipantData[]) => {
+  const handleMorParticipant = async (participant: Participant) => {
+    setLoading(true)
+
+    try {
+      // Atualizar status no banco de dados
+      await updateParticipantStatus(participant.id, "mor")
+
+      // Enviar para o Discord
+      const discordMessageId = await sendMorToDiscord(participant.player_name)
+
+      // Salvar MOR com o ID da mensagem (ou null se não enviou)
+      await saveMor(participant.id, participant.player_name, discordMessageId)
+
+      // Atualizar interface
+      setMorParticipants((prev) => [...prev, participant])
+      setParticipants((prev) => prev.map((p) => (p.id === participant.id ? { ...p, status: "mor" as const } : p)))
+
+      // Atualizar o agrupamento
+      setGroupedParticipants((prev) => {
+        const updated = { ...prev }
+        if (updated[participant.role]) {
+          updated[participant.role] = updated[participant.role].map((p) =>
+            p.id === participant.id ? { ...p, status: "mor" as const } : p,
+          )
+        }
+        return updated
+      })
+
+      alert(`${participant.player_name} foi adicionado à lista MOR!`)
+    } catch (error) {
+      console.error("Erro ao adicionar MOR:", error)
+      alert("Erro ao adicionar MOR. Tente novamente.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleTrollRaffle = (trollParticipants: Participant[]) => {
     if (trollParticipants.length === 0) return
 
-    const availableTrolls = trollParticipants.filter((p) => !p.status)
+    const availableTrolls = trollParticipants.filter((p) => p.status === "pending")
     if (availableTrolls.length === 0) {
       alert("Todos os Roletrolls já foram selecionados ou estão em MOR!")
       return
@@ -233,30 +277,44 @@ export default function AdminPanel() {
     const selectedTroll = availableTrolls[randomIndex]
 
     handleSelectParticipant(selectedTroll)
-    alert(`🎲 Roletroll sorteado: ${selectedTroll.playerName}!`)
+    alert(`🎲 Roletroll sorteado: ${selectedTroll.player_name}!`)
   }
 
-  const getParticipantStatus = (participant: ParticipantData) => {
+  const getParticipantStatus = (participant: Participant) => {
     if (participant.status === "selected") return "Selecionado"
     if (participant.status === "mor") return "MOR"
     return "Pendente"
   }
 
-  const getStatusColor = (participant: ParticipantData) => {
+  const getStatusColor = (participant: Participant) => {
     if (participant.status === "selected") return "bg-green-500"
     if (participant.status === "mor") return "bg-orange-500"
     return "bg-gray-500"
   }
 
-  const clearData = () => {
-    // Não limpar a lista MOR, apenas os participantes atuais
-    localStorage.removeItem("participants")
-    setParticipants([])
-    setGroupedParticipants({})
-    setSelectedParticipants([])
-    // Não limpar MOR aqui: setMorParticipants([])
+  const clearData = async () => {
+    if (!confirm("Tem certeza que deseja limpar todos os participantes? A lista MOR será mantida.")) {
+      return
+    }
 
-    alert("Dados limpos! A lista MOR foi mantida para a próxima disputa.")
+    setLoading(true)
+
+    try {
+      // Limpar participantes no banco de dados
+      await clearAllParticipants()
+
+      // Atualizar interface
+      setParticipants([])
+      setGroupedParticipants({})
+      setSelectedParticipants([])
+
+      alert("Dados limpos! A lista MOR foi mantida para a próxima disputa.")
+    } catch (error) {
+      console.error("Erro ao limpar dados:", error)
+      alert("Erro ao limpar dados. Tente novamente.")
+    } finally {
+      setLoading(false)
+    }
   }
 
   const getRoleColor = (role: string) => {
@@ -265,6 +323,17 @@ export default function AdminPanel() {
 
   if (!isAuthenticated) {
     return <div>Carregando...</div>
+  }
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
+        <div className="text-white text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500 mx-auto mb-4"></div>
+          <p className="text-xl">Carregando dados...</p>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -323,7 +392,7 @@ export default function AdminPanel() {
                   {selectedParticipants.map((participant) => (
                     <div key={participant.id} className="flex items-center justify-between bg-slate-700/30 p-2 rounded">
                       <div className="flex items-center gap-2">
-                        <span className="text-white text-sm font-medium">{participant.playerName}</span>
+                        <span className="text-white text-sm font-medium">{participant.player_name}</span>
                         <Badge className="bg-green-500 text-white text-xs">{participant.role}</Badge>
                       </div>
                       <Button
@@ -386,7 +455,7 @@ export default function AdminPanel() {
                     >
                       <div className="flex items-center gap-4">
                         <div>
-                          <h3 className="text-white font-semibold">{participant.playerName}</h3>
+                          <h3 className="text-white font-semibold">{participant.player_name}</h3>
                           <p className="text-slate-400 text-sm">IP: {participant.ip.toLocaleString()}</p>
                         </div>
                         <Badge className={`${getStatusColor(participant)} text-white`}>
@@ -394,7 +463,7 @@ export default function AdminPanel() {
                         </Badge>
                       </div>
                       <div className="flex gap-2">
-                        {!participant.status && (
+                        {participant.status === "pending" && (
                           <>
                             <Button
                               onClick={() => handleSelectParticipant(participant)}
@@ -447,29 +516,30 @@ export default function AdminPanel() {
             <CardContent>
               <div className="space-y-3">
                 {morListFromStorage.map((mor) => (
-                  <div key={mor.playerId} className="flex items-center justify-between p-4 bg-slate-700/50 rounded-lg">
+                  <div key={mor.id} className="flex items-center justify-between p-4 bg-slate-700/50 rounded-lg">
                     <div>
-                      <h3 className="text-white font-semibold">{mor.playerName}</h3>
-                      <p className="text-slate-400 text-sm">Desde: {new Date(mor.timestamp).toLocaleString()}</p>
+                      <h3 className="text-white font-semibold">{mor.player_name}</h3>
+                      <p className="text-slate-400 text-sm">Desde: {new Date(mor.created_at).toLocaleString()}</p>
                     </div>
                     <Button
                       onClick={async () => {
                         setLoading(true)
+                        try {
+                          // Notificar no Discord sobre a remoção
+                          await notifyMorRemovalToDiscord(mor.player_name)
 
-                        // Notificar no Discord sobre a remoção
-                        const webhookUrl = localStorage.getItem("discordWebhook")
-                        if (webhookUrl) {
-                          await notifyMorRemovalToDiscord(mor.playerName)
-                        }
+                          // Remover do banco de dados
+                          await removeMor(mor.player_id)
 
-                        removeMor(mor.playerId)
-                        setMorListFromStorage((prev) => prev.filter((m) => m.playerId !== mor.playerId))
-                        setLoading(false)
+                          // Atualizar interface
+                          setMorListFromStorage((prev) => prev.filter((m) => m.id !== mor.id))
 
-                        if (webhookUrl) {
-                          alert(`${mor.playerName} foi removido da lista MOR e notificado no Discord.`)
-                        } else {
-                          alert(`${mor.playerName} foi removido da lista MOR.`)
+                          alert(`${mor.player_name} foi removido da lista MOR.`)
+                        } catch (error) {
+                          console.error("Erro ao remover MOR:", error)
+                          alert("Erro ao remover MOR. Tente novamente.")
+                        } finally {
+                          setLoading(false)
                         }
                       }}
                       className="bg-red-600 hover:bg-red-700"
@@ -494,6 +564,9 @@ export default function AdminPanel() {
               <Settings className="mr-2 h-4 w-4" /> Configurações
             </Button>
           </Link>
+          <Button onClick={loadData} className="bg-purple-600 hover:bg-purple-700" disabled={loading}>
+            Atualizar Dados
+          </Button>
         </div>
       </div>
     </div>

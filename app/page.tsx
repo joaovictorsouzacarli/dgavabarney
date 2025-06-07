@@ -10,14 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { CheckCircle } from "lucide-react"
 import Image from "next/image"
-
-interface ParticipantData {
-  id: string
-  playerName: string
-  role: string
-  ip: number
-  timestamp: number
-}
+import { saveParticipant } from "@/lib/participants"
 
 const roles = [
   "Off Tank",
@@ -46,29 +39,28 @@ export default function ParticipantForm() {
   })
   const [isSubmitted, setIsSubmitted] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setIsLoading(true)
+    setError(null)
 
-    // Simular envio dos dados
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+    try {
+      // Salvar no Supabase
+      const result = await saveParticipant(formData.playerName, formData.role, formData.ip)
 
-    const participantData: ParticipantData = {
-      id: Math.random().toString(36).substr(2, 9),
-      ...formData,
-      timestamp: Date.now(),
+      if (!result) {
+        throw new Error("Erro ao salvar inscrição. Tente novamente.")
+      }
+
+      setIsSubmitted(true)
+    } catch (err) {
+      setError("Erro ao enviar inscrição. Por favor, tente novamente.")
+      console.error("Erro ao enviar formulário:", err)
+    } finally {
+      setIsLoading(false)
     }
-
-    // Salvar no localStorage temporariamente para demonstração
-    const existingData = JSON.parse(localStorage.getItem("participants") || "[]")
-    existingData.push(participantData)
-    localStorage.setItem("participants", JSON.stringify(existingData))
-
-    console.log("Dados enviados:", participantData)
-
-    setIsSubmitted(true)
-    setIsLoading(false)
   }
 
   const handleInputChange = (field: string, value: string | number) => {
@@ -172,6 +164,10 @@ export default function ParticipantForm() {
                 className="bg-slate-700/50 border-slate-600 text-white placeholder:text-slate-400"
               />
             </div>
+
+            {error && (
+              <div className="bg-red-900/50 border border-red-500/50 text-red-200 px-4 py-3 rounded">{error}</div>
+            )}
 
             <Button type="submit" className="w-full bg-purple-600 hover:bg-purple-700 text-white" disabled={isLoading}>
               {isLoading ? "Enviando..." : "Confirmar Inscrição"}

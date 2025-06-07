@@ -1,8 +1,10 @@
+import { getDiscordWebhook } from "./supabase"
+
 // Função para enviar MOR para o Discord
 export async function sendMorToDiscord(playerName: string): Promise<string | null> {
   try {
-    // Você precisará adicionar sua URL de webhook do Discord aqui
-    const webhookUrl = localStorage.getItem("discordWebhook") || ""
+    // Buscar webhook do banco de dados
+    const webhookUrl = await getDiscordWebhook()
 
     if (!webhookUrl) {
       console.error("URL do webhook do Discord não configurada")
@@ -23,7 +25,6 @@ export async function sendMorToDiscord(playerName: string): Promise<string | nul
 
     if (!response.ok) {
       throw new Error("Falha ao enviar mensagem para o Discord")
-      return null
     }
 
     // Retornar um ID único para controle interno
@@ -34,10 +35,10 @@ export async function sendMorToDiscord(playerName: string): Promise<string | nul
   }
 }
 
-// Função para notificar remoção de MOR no Discord (unificada)
+// Função para notificar remoção de MOR no Discord
 export async function notifyMorRemovalToDiscord(playerName: string): Promise<boolean> {
   try {
-    const webhookUrl = localStorage.getItem("discordWebhook") || ""
+    const webhookUrl = await getDiscordWebhook()
 
     if (!webhookUrl) {
       console.error("URL do webhook do Discord não configurada")
@@ -66,11 +67,4 @@ export async function notifyMorRemovalToDiscord(playerName: string): Promise<boo
     console.error("Erro ao notificar remoção no Discord:", error)
     return false
   }
-}
-
-// Função para remover MOR do Discord (mantida para compatibilidade)
-export async function removeMorFromDiscord(messageId: string): Promise<boolean> {
-  // Como webhooks têm limitações para deletar mensagens,
-  // vamos usar a função de notificação em vez de tentar deletar
-  return true
 }
